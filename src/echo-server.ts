@@ -3,6 +3,7 @@ import { Channel } from './channels';
 import { Server } from './server';
 import { HttpApi } from './api';
 import { Log } from './log';
+let request = require('request');
 import * as fs from 'fs';
 const packageFile = require('../package.json');
 const { constants } = require('crypto');
@@ -16,6 +17,7 @@ export class EchoServer {
      */
     public defaultOptions: any = {
         authHost: 'http://localhost',
+        authenticationEndpoint: '/broadcasting/authentication',
         authEndpoint: '/broadcasting/auth',
         clients: [],
         database: 'redis',
@@ -73,9 +75,16 @@ export class EchoServer {
     private httpApi: HttpApi;
 
     /**
+     * Request client.
+     */
+    private request: any;
+
+    /**
      * Create a new instance.
      */
-    constructor() { }
+    constructor() {
+        this.request = request;
+    }
 
     /**
      * Start the Echo Server.
@@ -203,7 +212,22 @@ export class EchoServer {
      * On server connection.
      */
     onConnect(): void {
+        // auth
+        this.server.io.use(async (socket, next) => {
+            this.loginAuthenticate(socket, socket.handshake.auth).then(res => {
+                next();
+            }, error => {
+                if (this.options.devMode) {
+                    console.log(error);
+                }
+                if (!(error instanceof Error)) {
+                    error = new Error(error.reason);
+                }
+                next(error);
+            });
+        });
         this.server.io.on('connection', socket => {
+            console.log(socket.id + "connected");
             this.onSubscribe(socket);
             this.onUnsubscribe(socket);
             this.onDisconnecting(socket);
@@ -248,6 +272,56 @@ export class EchoServer {
     onClientEvent(socket: any): void {
         socket.on('client event', data => {
             this.channel.clientEvent(socket, data);
+        });
+    }
+
+    loginAuthenticate(socket: any,auth: any): Promise<any> {
+        let authHosts = (this.options.authHost) ? this.options.authHost : '';
+        if (authHosts === '') {
+            return Promise.resolve({});
+        }
+
+        let options = {
+            url: authHosts + this.options.authenticationEndpoint,
+            form: {auth: auth},
+            headers: (auth && auth.headers) ? auth.headers : {},
+            rejectUnauthorized: false
+        };
+
+        if (this.options.devMode) {
+            Log.info(`[${new Date().toISOString()}] - Sending login request to: ${options.url}\n`);
+        }
+
+        return new Promise<any>((resolve, reject) => {
+            this.request.post(options, (error, response, body, next) => {
+                if (error) {
+                    if (this.options.devMode) {
+                        Log.error(`[${new Date().toISOString()}] - Error login authentication ${socket.id}`);
+                        Log.error(error);
+                    }
+
+                    reject({ reason: 'Error sending login request.', status: 0 });
+                } else if (response.statusCode !== 200) {
+                    if (this.options.devMode) {
+                        Log.warning(`[${new Date().toISOString()}] - ${socket.id} could not be login authenticated`);
+                        Log.error(response.body);
+                    }
+
+                    reject({ reason: 'Client can not be login, got HTTP status ' + response.statusCode, status: response.statusCode });
+                } else {
+                    if (this.options.devMode) {
+                        Log.info(`[${new Date().toISOString()}] - ${socket.id} login`);
+                    }
+
+                    try {
+                        body = JSON.parse(response.body);
+                    } catch (e) {
+                        body = response.body
+                    }
+
+                    resolve(body);
+                }
+            });
         });
     }
 }
